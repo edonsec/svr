@@ -1,0 +1,297 @@
+#!/bin/bash
+DB="$HOME/.logins"
+OUTPUT_MODE=""
+COLUMN_COUNT=8
+AUTO_DECRYPT=0
+
+UNIX_CLIPBOARD="xclip"
+OSX_CLIPBOARD="pbcopy"
+
+function help 
+{
+   echo "$0 <host> [full]"
+   echo "Available options:"
+   echo " -add <host> - Add a new host"
+   echo " -edit <host> - Edit a host, :wq to exit vim and write change"
+   echo " -view <host> - View the host details"
+   echo " -ssh <host> - Connect to this server via SSH"
+   echo " -sftp <host> - Connect to this server via SFTP"
+   echo " -ssh-proxy <host> [<port>] - Configures a socks proxy on specified port or random"
+   echo " -ssh-fwd <host> <remote port> - Configures a listening port bound to the remote port"
+   echo " -lock - Encrypts password file with password (gpg required)"
+   echo " -unlock - Decrypts password file with password (gpg required)"
+}
+
+function clipboard
+{
+   hash "$UNIX_CLIPBOARD" >/dev/null 2>&1 && xclip
+   hash "$OSX_CLIPBOARD" >/dev/null 2>&1 && pbcopy
+}
+
+function getdetails
+{
+   result=$(grep "host = $1" -A"$COLUMN_COUNT" "$DB")
+   if [ "$result" ]; then
+      host=$(echo "$result" | awk 'NR==1 { print $3 }')
+      ipaddr=$(echo "$result" | awk 'NR==2 { print $3}')
+      port=$(echo "$result" | awk 'NR==3 {print $3}')
+      user=$(echo "$result" | awk 'NR==4 {print $3}')
+      pass=$(echo "$result" | awk 'NR==5 {print $3}')
+      root=$(echo "$result" | awk 'NR==6 {print $3}')
+      portknock=$(echo "$result" | awk 'NR==7 {print $3}')
+      identity=$(echo "$result" | awk 'NR==8 { print $3}' )
+      date=$(echo "$result" | awk -F' = ' 'NR==9 { print $2; }')
+      
+      return 1
+   else
+      return 0
+   fi
+}
+
+function get_file_octal
+{
+   OCTAL=$(stat -c "%a" $1 2>/dev/null)
+
+   if [ $? -ne 0 ]; then
+      OCTAL=$(stat -f '%A' $1)
+   fi
+}
+
+function get_random_port
+{
+    RANDOM_PORT=$((1000 + RANDOM % 65535))
+}
+
+function sshconnection
+{
+   isconf=$(grep "Host $arg" ~/.ssh/config | wc -l)
+   if [ $isconf -eq 0 ]; then
+      echo "Entry not found in ssh config, new entry added"
+      "$0" -ssh-conf "$arg"
+   fi
+   if [ -n "$portknock" ]; then
+      if [ ! hash fwknop &> /dev/null ]; then
+         echo "This server requires port knocking"
+         echo "Please install fwknop: http://www.cipherdyne.org/fwknop/"
+         echo "If it is installed, please include it within your PATH"
+         exit
+      fi
+      echo "$portknock" | clipboard
+      fwknop -A "tcp/$port" -s -D "$ipaddr"
+   fi
+   if [ -n "$pass" ]; then
+      echo "$pass" | clipboard
+      if [ -n "$root" ]; then
+         echo "$root" | clipboard
+      fi
+   else
+      if [ -n "$root" ]; then
+         user="root"
+         echo "$root" | clipboard
+      fi
+   fi
+}
+
+if [ $# -eq 0 ]; then
+   help
+   exit
+fi
+
+if [ -e "$DB.gpg" ] && [ "$1" != "-unlock" ]; then
+   if [ $AUTO_DECRYPT -ne 1 ]; then
+      echo "The password database is encrypted, you need to decrypt it to continue."
+      echo -n "Would you like to do this now? y/n "
+      read dodecrypt
+      if [ "$dodecrypt" == "y" ] && [ $AUTO_DECRYPT -ne 2 ]; then
+         echo -n "Would you like to do this automatically from now on? y/n "
+         read autodecrypt
+         if [ "$autodecrypt" == "y" ]; then
+            sed -i 's/AUTO_DECRYPT=[01]/AUTO_DECRYPT=1/' "$0"
+         else
+            sed -i 's/AUTO_DECRYPT=[01]/AUTO_DECRYPT=2/' "$0"
+         fi
+      fi
+   else
+      dodecrypt="y"
+   fi
+   if [ "$dodecrypt" == "y" ]; then
+      "$0" -unlock
+   fi
+fi
+
+get_file_octal $DB
+if [ "$OCTAL" != "600" ]; then
+   echo "Insecure or invalid permissions, resetting to 600."
+   chmod 600 "$DB"
+fi
+
+for arg in $*; do
+   if [ ${arg:0:1} == '-' ]; then
+      case ${arg:1} in
+         ssh|sftp|ssh-conf|ssh-proxy|ssh-fwd|view)
+            OUTPUT_MODE=${arg:1}
+         ;;
+         lock)
+            echo "Encrypting database..."
+            gpg -c $DB
+            if [ $? -eq 0 ]; then
+               rm $DB
+            fi
+            exit
+         ;;
+         unlock)
+            echo "Unencrypting database..."
+            gpg "$DB.gpg"
+            if [ $? -eq 0 ]; then
+               rm "$DB.gpg"
+            fi
+            exit
+         ;;
+         add)
+            if [ ! "$2" ]; then
+               echo -n "Host: "
+               read host
+            else
+               host="$2"
+            fi
+
+            echo -n "IP Address: "
+            read ipaddr
+            echo -n "Port: "
+            read port
+            echo -n "User: "
+            read user
+            echo -n "Password: "
+            read pass
+            echo -n "Root: "
+            read root
+            echo -n "Port knock: "
+            read portknock
+            echo -n "Identity file: "
+            read identity
+            echo -e "\n   host = $host" >> "$DB"
+            echo "   ipaddr = $ipaddr" >> "$DB"
+            echo "     port = $port" >> "$DB"
+            echo "     user = $user" >> "$DB"
+            echo "     pass = $pass" >> "$DB"
+            echo "     root = $root" >> "$DB"
+            echo "portknock = $portknock" >> "$DB"
+            echo " identity = $identity" >> "$DB"
+            echo "     date =" $(date) >> "$DB"
+            echo "Host $host now added."
+            exit
+         ;;
+         edit)
+            if [ ! "$2" ]; then
+               echo -n "Which host would you like to edit? "
+               read edit
+            else
+               edit="$2"
+            fi
+
+            vim "+/host = $edit" "$DB"
+            echo "Edits now saved."
+            exit
+         ;;
+         *)
+            help
+         ;;
+      esac
+      continue
+   fi
+   if [ $arg ]; then
+      getdetails "$arg"
+
+      if [ $? -eq 1 ]; then
+         case $OUTPUT_MODE in
+            ssh)
+               sshconnection;
+               ssh $arg
+            ;;
+            sftp)
+               sshconnection;
+               sftp $arg
+            ;;
+            ssh-fwd)
+               sshconnection
+
+               if [ ! "$3" ]; then
+                  echo -n "Port to forward: "
+                  read FWD_PORT
+               else
+                  FWD_PORT="$3"
+               fi
+
+               get_random_port
+
+               echo "Port $RANDOM_PORT bound to $arg:$FWD_PORT"
+               ssh -N -f -L "$RANDOM_PORT:127.0.0.1:$FWD_PORT" $arg
+               exit
+            ;;
+            ssh-proxy)
+               sshconnection
+
+               if [ $3 ]; then
+                  PORT=$3
+               else
+                  get_random_port
+                  PORT=$RANDOM_PORT
+               fi
+
+               echo "Binding to port $PORT"
+               ssh -N -f -D $PORT $arg
+               exit
+            ;;
+            ssh-conf)
+               if [ ! $user ]; then
+                  user='root'
+               fi
+               echo -e "\nHost $arg" >> ~/.ssh/config
+               echo "Hostname $ipaddr" >> ~/.ssh/config
+               echo "User $user" >> ~/.ssh/config
+               echo "Port $port" >> ~/.ssh/config
+               if [ "$identity" ]; then
+                  echo "IdentityFile $identity" >> ~/.ssh/config
+               fi
+            ;;
+            view)
+               echo -e "\033[1mIP Address:\033[0m $ipaddr (port $port)"
+               if [ $user ]; then
+                  echo -e "\033[1mUser:\033[0m $user"
+               fi
+               if [ $pass ]; then
+                  echo -e "\033[1mPassword:\033[0m $pass" 
+               fi
+               if [ $root ]; then
+                  echo -e "\033[1mRoot:\033[0m $root"
+               fi
+               if [ $portknock ]; then
+                  echo -e "\033[1mPortknock:\033[0m $portknock"
+               fi
+               if [ $identity ]; then
+                  echo -e "\033[1mIdentity:\033[0m $identity"
+               fi
+               if [ "$date" ]; then
+                  echo -e "\033[1mDate:\033[0m $date"
+               fi
+            ;;
+            *)
+               if [ $port ]; then
+                  echo -e "\033[1mPort:\033[0m $port"
+               fi
+               if [ $user ]; then
+                  echo -e "\033[1mUser:\033[0m $user"
+               fi
+               if [ $pass ]; then
+                  echo -e "\033[1mPassword:\033[0m $pass" 
+               fi
+               if [ $root ]; then
+                  echo -e "\033[1mRoot:\033[0m $root"
+               fi
+            ;;
+         esac   
+      else
+         echo "No result."
+      fi
+   fi
+done
