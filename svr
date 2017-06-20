@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
 DB="$HOME/.logins"
 OUTPUT_MODE=""
 COLUMN_COUNT=8
